@@ -3,6 +3,7 @@
 #include <ATen/ATen.h>
 #include <ATen/Tensor.h>
 #include <ATen/dlpack.h>
+#include <ATen/DLPackPreExportHook.h>
 
 // this converter will:
 // 1) take a Tensor object and wrap it in the DLPack tensor

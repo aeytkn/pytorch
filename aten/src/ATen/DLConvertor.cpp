@@ -1,4 +1,5 @@
 #include <ATen/DLConvertor.h>
+#include <ATen/DLPackPreExportHook.h>
 #include <memory>
 
 using namespace std;
@@ -413,8 +414,13 @@ void fillVersion<DLManagedTensorVersioned>(
 // DLPACK_FLAG_BITMASK_READ_ONLY flag is set on the versioned struct.
 template <class T>
 T* toDLPackImpl(const Tensor& src, bool read_only) {
+  // Apply pre-export hook if registered for this device type.
+  // For CPU/CUDA (no hook registered), this is an identity — returns src
+  // unchanged with zero overhead (single atomic load + nullptr check).
+  // For NPU, this may convert padded-format tensors to base format.
+  Tensor validated_src = maybeValidateForDLPack(src);
   auto atDLMTensor = std::make_unique<ATenDLMTensor<T>>();
-  atDLMTensor->handle = src;
+  atDLMTensor->handle = validated_src;
   atDLMTensor->tensor.manager_ctx = atDLMTensor.get();
   atDLMTensor->tensor.deleter = &deleter<T>;
   // DLTensor::data is a plain void*, so the read-only path const_casts away the
@@ -422,22 +428,22 @@ T* toDLPackImpl(const Tensor& src, bool read_only) {
   // materialize a copy-on-write tensor, and DLPACK_FLAG_BITMASK_READ_ONLY is
   // set on the versioned struct (see fillVersion) so the consumer is told not
   // to write through the pointer. The mutable path uses mutable_data_ptr().
-  if (src.device().type()  == kMPS) {
+  if (validated_src.device().type()  == kMPS) {
       atDLMTensor->tensor.dl_tensor.data = read_only
-          ? const_cast<void*>(src.storage().data())
-          : src.storage().mutable_data();
-      atDLMTensor->tensor.dl_tensor.byte_offset = src.storage_offset() * c10::elementSize(src.scalar_type());
+          ? const_cast<void*>(validated_src.storage().data())
+          : validated_src.storage().mutable_data();
+      atDLMTensor->tensor.dl_tensor.byte_offset = validated_src.storage_offset() * c10::elementSize(validated_src.scalar_type());
   } else {
       atDLMTensor->tensor.dl_tensor.data = read_only
-          ? const_cast<void*>(src.const_data_ptr())
-          : src.mutable_data_ptr();
+          ? const_cast<void*>(validated_src.const_data_ptr())
+          : validated_src.mutable_data_ptr();
       atDLMTensor->tensor.dl_tensor.byte_offset = 0;
   }
-  atDLMTensor->tensor.dl_tensor.device = torchDeviceToDLDevice(src.device());
-  atDLMTensor->tensor.dl_tensor.ndim = static_cast<int32_t>(src.dim());
-  atDLMTensor->tensor.dl_tensor.dtype = getDLDataType(src);
-  atDLMTensor->tensor.dl_tensor.shape = const_cast<int64_t*>(src.sizes().data());
-  atDLMTensor->tensor.dl_tensor.strides = const_cast<int64_t*>(src.strides().data());
+  atDLMTensor->tensor.dl_tensor.device = torchDeviceToDLDevice(validated_src.device());
+  atDLMTensor->tensor.dl_tensor.ndim = static_cast<int32_t>(validated_src.dim());
+  atDLMTensor->tensor.dl_tensor.dtype = getDLDataType(validated_src);
+  atDLMTensor->tensor.dl_tensor.shape = const_cast<int64_t*>(validated_src.sizes().data());
+  atDLMTensor->tensor.dl_tensor.strides = const_cast<int64_t*>(validated_src.strides().data());
   fillVersion(&atDLMTensor->tensor, read_only);
 
   return &(atDLMTensor.release()->tensor);

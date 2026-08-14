@@ -3,6 +3,7 @@
 #include <ATen/Functions.h>
 #include <ATen/Utils.h>
 #include <c10/core/Allocator.h>
+#include <c10/core/FromBlobBackend.h>
 
 namespace at {
 
@@ -20,15 +21,38 @@ Tensor TensorMaker::make_tensor() {
      device_ = globalContext().getDeviceFromPtr(data_, opts_.device().type());
    }
 
-   if (opts_.device().has_index()) {
-     // clang-format off
-     TORCH_CHECK_VALUE(
-         opts_.device() == *device_,
-         "Specified device ", opts_.device(), " does not match device of data ", *device_);
-     // clang-format on
-   }
+    if (opts_.device().has_index()) {
+      // clang-format off
+      TORCH_CHECK_VALUE(
+          opts_.device() == *device_,
+          "Specified device ", opts_.device(), " does not match device of data ", *device_);
+      // clang-format on
+    }
 
-   std::size_t size_bytes = computeStorageSize();
+    // Dispatch to registered FromBlobBackend if available.
+    // Only delegate for the deleter-based path (not context/resizable/allocator),
+    // which covers DLPack, AOTI, and the common from_blob overloads.
+    // For CPU/CUDA (no backend registered), this is a single nullptr check
+    // and falls through to the standard TensorImpl creation path.
+    if (deleter_ && !ctx_ && !resizeable_) {
+      if (auto* backend = c10::getFromBlobBackend(device_->type())) {
+        IntArrayRef strides_arg{};
+        if (strides_) {
+          strides_arg = *strides_;
+        }
+        int64_t storage_offset_arg = storage_offset_.value_or(0);
+        return backend->from_blob(
+            data_,
+            sizes_,
+            strides_arg,
+            storage_offset_arg,
+            std::move(deleter_),
+            opts_,
+            *device_);
+      }
+    }
+
+    std::size_t size_bytes = computeStorageSize();
 
    DataPtr data_ptr{};
    if (deleter_) {
